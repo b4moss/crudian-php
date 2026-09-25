@@ -1,0 +1,52 @@
+{
+  "name": "b4moss/crudian",
+  "description": "CRUD abstraction for DDD repositories (PDO + libSQL preview)",
+  "version": "0.12.0",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Kohki SHIKATA",
+      "email": "kohki-shikata@users.noreply.github.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.3",
+    "ext-pdo": "*"
+  },
+  "suggest": {
+    "ext-pdo_sqlite": "SQLite via PDO",
+    "ext-pdo_pgsql": "Postgres via PDO",
+    "ext-pdo_mysql": "MySQL via PDO",
+    "ext-ffi": "Required for turso/libsql (technical preview)",
+    "turso/libsql": "libSQL adapter (technical preview)"
+  },
+  "autoload": {
+    "psr-4": {
+      "B4moss\\Crudian\\": "src/"
+    },
+    "files": [
+      "src/functions.php",
+      "src/Pdo/functions.php",
+      "src/Libsql/functions.php"
+    ]
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "B4moss\\Crudian\\Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5",
+    "phpstan/phpstan": "^2.1"
+  },
+  "scripts": {
+    "test": "phpunit",
+    "phpstan": "phpstan analyse --memory-limit=512M"
+  },
+  "config": {
+    "sort-packages": true
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
