@@ -1,15 +1,19 @@
 {
   "name": "b4moss/crudian",
   "description": "CRUD abstraction for DDD repositories (PDO + libSQL preview)",
-  "version": "0.12.0",
   "type": "library",
   "license": "MIT",
+  "homepage": "https://github.com/b4moss/crudian",
   "authors": [
     {
       "name": "Kohki SHIKATA",
       "email": "kohki-shikata@users.noreply.github.com"
     }
   ],
+  "support": {
+    "issues": "https://github.com/b4moss/crudian/issues",
+    "source": "https://github.com/b4moss/crudian-php"
+  },
   "require": {
     "php": ">=8.3",
     "ext-pdo": "*"
