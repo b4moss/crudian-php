@@ -1,0 +1,189 @@
+name: Sync from monorepo
+
+# Owns Packagist dist for b4moss/crudian.
+# Triggers when monorepo has Release packages/php/vX.Y.Z but this repo lacks tag vX.Y.Z.
+# Uses GITHUB_TOKEN only (no cross-repo PAT).
+#
+# Source of truth: https://github.com/b4moss/crudian/packages/php
+
+on:
+  schedule:
+    # Monorepo publish creates the Release marker; pick it up without a PAT dispatch.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "X.Y.Z to sync (empty = next pending monorepo Release)"
+        required: false
+        type: string
+  repository_dispatch:
+    types: [php-publish]
+
+concurrency:
+  group: sync-from-monorepo
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: mirror packages/php → tag → Packagist
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout dist
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version to sync
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version || '' }}
+        run: |
+          set -euo pipefail
+          MONO=b4moss/crudian
+
+          pending() {
+            # Monorepo Releases named packages/php/vX.Y.Z that lack dist tag vX.Y.Z
+            local rel tag ver
+            while IFS= read -r rel; do
+              [[ -z "$rel" ]] && continue
+              ver="${rel#packages/php/v}"
+              tag="v${ver}"
+              if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+                echo "$ver"
+              fi
+            done < <(gh release list --repo "$MONO" --limit 50 --json tagName \
+              --jq '.[].tagName | select(startswith("packages/php/v"))')
+          }
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION#v}"
+            VER="${VER#packages/php/v}"
+          else
+            VER="$(pending | head -n1 || true)"
+          fi
+
+          if [[ -z "${VER}" ]]; then
+            echo "No pending PHP dist version; nothing to do."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          MONO_TAG="packages/php/v${VER}"
+          DIST_TAG="v${VER}"
+
+          if ! gh release view "$MONO_TAG" --repo "$MONO" >/dev/null 2>&1; then
+            echo "Monorepo Release ${MONO_TAG} does not exist yet (tests/gate not done); skip."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${DIST_TAG}" >/dev/null; then
+            echo "Dist tag ${DIST_TAG} already exists; skip."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Will sync ${MONO_TAG} → ${DIST_TAG}"
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+          echo "version=${VER}" >>"$GITHUB_OUTPUT"
+          echo "mono_tag=${MONO_TAG}" >>"$GITHUB_OUTPUT"
+          echo "dist_tag=${DIST_TAG}" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout monorepo at release tag
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: b4moss/crudian
+          ref: ${{ steps.resolve.outputs.mono_tag }}
+          path: .monorepo
+          fetch-depth: 1
+
+      - name: Mirror packages/php into dist root
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          DIST_TAG: ${{ steps.resolve.outputs.dist_tag }}
+          MONO_TAG: ${{ steps.resolve.outputs.mono_tag }}
+        run: |
+          set -euo pipefail
+          SRC=".monorepo/packages/php"
+          if [[ ! -f "$SRC/composer.json" ]]; then
+            echo "missing $SRC/composer.json" >&2
+            exit 1
+          fi
+          FILE_VER="$(tr -d '[:space:]' <"$SRC/VERSION")"
+          if [[ "$FILE_VER" != "$VERSION" ]]; then
+            echo "VERSION file (${FILE_VER}) != requested (${VERSION})" >&2
+            exit 1
+          fi
+
+          # Keep this repo's Actions workflows; replace package tree only.
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.monorepo' \
+            "${SRC}/" ./
+
+          rm -rf .monorepo
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Tree already matches monorepo packages/php; tagging only."
+          else
+            git commit -m "sync: b4moss/crudian ${MONO_TAG}"
+          fi
+
+          git tag -a "$DIST_TAG" -m "b4moss/crudian ${DIST_TAG}"
+          git push origin HEAD:main
+          git push origin "refs/tags/${DIST_TAG}"
+
+      - name: Create GitHub Release
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIST_TAG: ${{ steps.resolve.outputs.dist_tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          MONO_TAG: ${{ steps.resolve.outputs.mono_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$DIST_TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $DIST_TAG"
+            exit 0
+          fi
+          notes="Packagist distribution of \`b4moss/crudian\` v${VERSION}.
+
+          Synced from monorepo Release \`${MONO_TAG}\` (https://github.com/b4moss/crudian/releases/tag/${MONO_TAG})."
+          if ! out="$(gh release create "$DIST_TAG" \
+            --title "b4moss/crudian v${VERSION}" \
+            --notes "$notes" \
+            --verify-tag 2>&1)"; then
+            echo "$out"
+            if echo "$out" | grep -qi 'already exists'; then
+              exit 0
+            fi
+            exit 1
+          fi
+
+      - name: Ping Packagist update
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PACKAGIST_TOKEN:-}" || -z "${PACKAGIST_USERNAME:-}" ]]; then
+            echo "PACKAGIST_USERNAME / PACKAGIST_TOKEN not set; skip Packagist ping (use GitHub webhook)."
+            exit 0
+          fi
+          curl -sS -X POST "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d '{"repository":{"url":"https://github.com/b4moss/crudian-php"}}'
