@@ -224,4 +224,144 @@ final class PdoSqliteTest extends TestCase
         $this->assertSame('"a""b"', (new SqliteDialect())->quoteIdent('a"b'));
         $this->assertSame('`a``b`', (new MySQLDialect())->quoteIdent('a`b'));
     }
+
+    public function testOrderBy(): void
+    {
+        $crud = createCrud($this->open());
+        $crud->create('items', ['name' => 'a', 'score' => 2]);
+        $crud->create('items', ['name' => 'b', 'score' => 1]);
+        $crud->create('items', ['name' => 'c', 'score' => 2]);
+
+        $def = $crud->search('items', ['limit' => 10]);
+        $this->assertSame([1, 2, 3], array_map(static fn ($r) => (int) $r['id'], $def->items));
+
+        $empty = $crud->search('items', ['orderBy' => [], 'limit' => 10]);
+        $this->assertSame([1, 2, 3], array_map(static fn ($r) => (int) $r['id'], $empty->items));
+
+        $asc = $crud->search('items', [
+            'orderBy' => [['column' => 'score']],
+            'limit' => 10,
+        ]);
+        $this->assertSame([1, 2, 2], array_map(static fn ($r) => (int) $r['score'], $asc->items));
+
+        $desc = $crud->search('items', [
+            'orderBy' => [['column' => 'score', 'direction' => 'desc']],
+            'limit' => 10,
+        ]);
+        $this->assertSame([2, 2, 1], array_map(static fn ($r) => (int) $r['score'], $desc->items));
+
+        $multi = $crud->search('items', [
+            'orderBy' => [
+                ['column' => 'score', 'direction' => 'asc'],
+                ['column' => 'id', 'direction' => 'asc'],
+            ],
+            'limit' => 10,
+        ]);
+        $this->assertSame([2, 1, 3], array_map(static fn ($r) => (int) $r['id'], $multi->items));
+
+        $list = $crud->list('items', [
+            'orderBy' => [['column' => 'score', 'direction' => 'desc']],
+            'limit' => 10,
+        ]);
+        $this->assertSame($desc->total, $list->total);
+        $this->assertSame(
+            array_map(static fn ($r) => (int) $r['id'], $desc->items),
+            array_map(static fn ($r) => (int) $r['id'], $list->items),
+        );
+
+        $cursor = $crud->search('items', ['paging' => 'cursor', 'limit' => 1]);
+        $this->assertSame([1], array_map(static fn ($r) => (int) $r['id'], $cursor->items));
+
+        $this->expectException(\B4moss\Crudian\CrudianError::class);
+        $crud->search('items', [
+            'paging' => 'cursor',
+            'orderBy' => [['column' => 'score']],
+            'limit' => 2,
+        ]);
+    }
+
+    public function testOrderByRejectsBadDirection(): void
+    {
+        $crud = createCrud($this->open());
+        $this->expectException(\B4moss\Crudian\CrudianError::class);
+        $crud->search('items', [
+            'orderBy' => [['column' => 'score', 'direction' => 'ASC']],
+            'limit' => 2,
+        ]);
+    }
+
+    public function testGroupBy(): void
+    {
+        $crud = createCrud($this->open());
+        $crud->create('items', ['name' => 'a', 'score' => 1]);
+        $crud->create('items', ['name' => 'a', 'score' => 3]);
+        $crud->create('items', ['name' => 'b', 'score' => 10]);
+
+        $page = $crud->search('items', [
+            'groupBy' => ['name'],
+            'columns' => ['name'],
+            'aggregates' => [
+                ['fn' => 'count', 'as' => 'n'],
+                ['fn' => 'sum', 'column' => 'score', 'as' => 'total'],
+            ],
+            'limit' => 10,
+        ]);
+        $this->assertSame(2, $page->total);
+        $this->assertCount(2, $page->items);
+        $by = [];
+        foreach ($page->items as $row) {
+            $by[(string) $row['name']] = $row;
+        }
+        $this->assertSame(2, (int) $by['a']['n']);
+        $this->assertSame(4, (int) $by['a']['total']);
+        $this->assertSame(1, (int) $by['b']['n']);
+        $this->assertSame(10, (int) $by['b']['total']);
+
+        foreach (['c', 'a', 'b', 'a', 'b', 'b'] as $name) {
+            $crud->create('items', ['name' => $name, 'score' => 1]);
+        }
+        $page1 = $crud->search('items', [
+            'groupBy' => ['name'],
+            'columns' => ['name'],
+            'aggregates' => [['fn' => 'count', 'as' => 'n']],
+            'limit' => 2,
+        ]);
+        $this->assertSame(3, $page1->total);
+        $this->assertSame(['a', 'b'], array_map(static fn ($r) => (string) $r['name'], $page1->items));
+        $this->assertTrue($page1->hasMore);
+
+        $page2 = $crud->search('items', [
+            'groupBy' => ['name'],
+            'columns' => ['name'],
+            'aggregates' => [['fn' => 'count', 'as' => 'n']],
+            'limit' => 2,
+            'offset' => 2,
+        ]);
+        $this->assertSame(['c'], array_map(static fn ($r) => (string) $r['name'], $page2->items));
+        $this->assertFalse($page2->hasMore);
+
+        $list = $crud->list('items', [
+            'groupBy' => ['name'],
+            'columns' => ['name'],
+            'aggregates' => [['fn' => 'count', 'as' => 'n']],
+            'limit' => 10,
+        ]);
+        $this->assertSame($page1->total, $list->total);
+
+        $this->expectException(\B4moss\Crudian\CrudianError::class);
+        $crud->search('items', ['groupBy' => []]);
+    }
+
+    public function testGroupByRejectsCursorAndAggregatesOnly(): void
+    {
+        $crud = createCrud($this->open());
+        try {
+            $crud->search('items', ['paging' => 'cursor', 'groupBy' => ['name'], 'limit' => 2]);
+            $this->fail('expected cursor+groupBy reject');
+        } catch (\B4moss\Crudian\CrudianError) {
+            $this->assertTrue(true);
+        }
+        $this->expectException(\B4moss\Crudian\CrudianError::class);
+        $crud->search('items', ['aggregates' => [['fn' => 'count', 'as' => 'n']], 'limit' => 10]);
+    }
 }

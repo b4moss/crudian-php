@@ -236,7 +236,10 @@ final class Crud
      *   limit?: int,
      *   cursor?: mixed,
      *   paging?: string,
-     *   offset?: int|null
+     *   offset?: int|null,
+     *   orderBy?: list<array{column: string, direction?: string}>,
+     *   groupBy?: list<string>,
+     *   aggregates?: list<array{fn: string, column?: string, as: string}>
      * } $query
      */
     public function search(string $table, array $query = []): SearchResult
@@ -270,8 +273,21 @@ final class Crud
             throw CrudianError::of('cursor must be a number, string, or null');
         }
 
+        validateSearchExtras($query, $paging);
+        $extras = buildSearchSqlExtras($this->d, $query, $this->pk);
+
         $where = compileWhere($this->d, resolveWhere($query['where'] ?? null), 1);
-        $total = $this->count($tbl, ['where' => $query['where'] ?? null]);
+        $whereSQL = $where->sql !== '' ? ' WHERE ' . $where->sql : '';
+
+        if ($extras['hasGroupBy']) {
+            $countSql = 'SELECT COUNT(*) AS ' . $this->d->quoteIdent('row_count') . ' FROM ('
+                . 'SELECT 1 FROM ' . $this->d->quoteIdent($tbl) . $whereSQL . $extras['groupBySql']
+                . ') AS ' . $this->d->quoteIdent('_crudian_groups');
+            $countRow = $this->ex->get($countSql, $where->args);
+            $total = toInt($countRow['row_count'] ?? 0);
+        } else {
+            $total = $this->count($tbl, ['where' => $query['where'] ?? null]);
+        }
 
         if ($paging === 'offset') {
             $offset = is_int($offsetOpt) ? $offsetOpt : 0;
@@ -279,10 +295,10 @@ final class Crud
                 throw CrudianError::of('offset must be a non-negative number');
             }
             $args = $where->args;
-            $whereSQL = $where->sql !== '' ? ' WHERE ' . $where->sql : '';
             $idx = $where->nextIndex;
-            $sql = 'SELECT ' . selectColumns($this->d, $query['columns'] ?? []) . ' FROM ' . $this->d->quoteIdent($tbl)
-                . $whereSQL . ' ORDER BY ' . $this->d->quoteIdent($this->pk) . ' ASC LIMIT ' . $this->d->placeholder($idx)
+            $sql = 'SELECT ' . $extras['selectSql'] . ' FROM ' . $this->d->quoteIdent($tbl)
+                . $whereSQL . $extras['groupBySql'] . $extras['orderBySql']
+                . ' LIMIT ' . $this->d->placeholder($idx)
                 . ' OFFSET ' . $this->d->placeholder($idx + 1);
             $args[] = $limit;
             $args[] = $offset;
@@ -308,12 +324,12 @@ final class Crud
             $args[] = $cursor;
             $idx++;
         }
-        $whereSQL = '';
+        $cursorWhereSQL = '';
         if ($parts !== []) {
-            $whereSQL = ' WHERE ' . implode(' AND ', $parts);
+            $cursorWhereSQL = ' WHERE ' . implode(' AND ', $parts);
         }
-        $sql = 'SELECT ' . selectColumns($this->d, $query['columns'] ?? []) . ' FROM ' . $this->d->quoteIdent($tbl)
-            . $whereSQL . ' ORDER BY ' . $this->d->quoteIdent($this->pk) . ' ASC LIMIT ' . $this->d->placeholder($idx);
+        $sql = 'SELECT ' . $extras['selectSql'] . ' FROM ' . $this->d->quoteIdent($tbl)
+            . $cursorWhereSQL . $extras['orderBySql'] . ' LIMIT ' . $this->d->placeholder($idx);
         $args[] = $limit + 1;
         $rows = $this->ex->all($sql, $args);
         $hasMore = count($rows) > $limit;
@@ -339,7 +355,10 @@ final class Crud
      *   limit?: int,
      *   cursor?: mixed,
      *   paging?: string,
-     *   offset?: int|null
+     *   offset?: int|null,
+     *   orderBy?: list<array{column: string, direction?: string}>,
+     *   groupBy?: list<string>,
+     *   aggregates?: list<array{fn: string, column?: string, as: string}>
      * } $query
      */
     public function list(string $table, array $query = []): SearchResult

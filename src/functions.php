@@ -199,3 +199,158 @@ function toInt(mixed $v): int
 
     return 0;
 }
+
+/**
+ * @param array<string, mixed> $query
+ */
+function validateSearchExtras(array $query, string $paging): void
+{
+    $orderBy = $query['orderBy'] ?? null;
+    if ($orderBy !== null) {
+        if (!is_array($orderBy)) {
+            throw CrudianError::of('orderBy must be an array');
+        }
+        foreach ($orderBy as $clause) {
+            if (!is_array($clause)) {
+                throw CrudianError::of('orderBy clause must be an object');
+            }
+            if (!isset($clause['column']) || !is_string($clause['column'])) {
+                throw CrudianError::of('orderBy.column must be a string');
+            }
+            $dir = $clause['direction'] ?? null;
+            if ($dir !== null && $dir !== 'asc' && $dir !== 'desc') {
+                throw CrudianError::of('orderBy.direction must be "asc" or "desc"');
+            }
+        }
+    }
+
+    $groupBy = $query['groupBy'] ?? null;
+    if ($groupBy !== null) {
+        if (!is_array($groupBy)) {
+            throw CrudianError::of('groupBy must be an array');
+        }
+        if ($groupBy === []) {
+            throw CrudianError::of('groupBy must not be empty');
+        }
+        foreach ($groupBy as $col) {
+            if (!is_string($col)) {
+                throw CrudianError::of('groupBy column must be a string');
+            }
+        }
+    }
+
+    $aggregates = $query['aggregates'] ?? null;
+    if ($aggregates !== null) {
+        if (!is_array($aggregates)) {
+            throw CrudianError::of('aggregates must be an array');
+        }
+        if (!is_array($groupBy) || count($groupBy) < 1) {
+            throw CrudianError::of('aggregates require groupBy');
+        }
+        $ok = ['count' => true, 'sum' => true, 'avg' => true, 'min' => true, 'max' => true];
+        foreach ($aggregates as $agg) {
+            if (!is_array($agg)) {
+                throw CrudianError::of('aggregate must be an object');
+            }
+            $fn = $agg['fn'] ?? null;
+            if (!is_string($fn) || !isset($ok[$fn])) {
+                throw CrudianError::of('aggregate.fn is invalid');
+            }
+            $as = $agg['as'] ?? null;
+            if (!is_string($as) || $as === '') {
+                throw CrudianError::of('aggregate.as must be a non-empty string');
+            }
+            if ($fn !== 'count') {
+                $col = $agg['column'] ?? null;
+                if (!is_string($col) || $col === '') {
+                    throw CrudianError::of('aggregate.column is required');
+                }
+            } elseif (array_key_exists('column', $agg) && !is_string($agg['column'])) {
+                throw CrudianError::of('aggregate.column must be a string');
+            }
+        }
+    }
+
+    $orderByNonEmpty = is_array($orderBy) && count($orderBy) > 0;
+    $groupByNonEmpty = is_array($groupBy) && count($groupBy) > 0;
+    if ($paging === 'cursor' && $orderByNonEmpty) {
+        throw CrudianError::of('cursor paging does not accept orderBy');
+    }
+    if ($paging === 'cursor' && $groupByNonEmpty) {
+        throw CrudianError::of('cursor paging does not accept groupBy');
+    }
+}
+
+/**
+ * @param array<string, mixed> $agg
+ */
+function aggregateSql(Dialect $d, array $agg): string
+{
+    $alias = $d->quoteIdent((string) $agg['as']);
+    $fn = strtoupper((string) $agg['fn']);
+    $col = $agg['column'] ?? null;
+    if (($agg['fn'] ?? '') === 'count' && ($col === null || $col === '')) {
+        return $fn . '(*) AS ' . $alias;
+    }
+
+    return $fn . '(' . $d->quoteIdent((string) $col) . ') AS ' . $alias;
+}
+
+/**
+ * @param array<string, mixed> $query
+ * @return array{selectSql: string, groupBySql: string, orderBySql: string, hasGroupBy: bool}
+ */
+function buildSearchSqlExtras(Dialect $d, array $query, string $pk): array
+{
+    $groupBy = $query['groupBy'] ?? null;
+    $hasGroupBy = is_array($groupBy) && $groupBy !== [];
+    /** @var list<array<string, mixed>> $aggregates */
+    $aggregates = is_array($query['aggregates'] ?? null) ? $query['aggregates'] : [];
+
+    if ($hasGroupBy) {
+        /** @var list<string> $cols */
+        $cols = (isset($query['columns']) && is_array($query['columns']) && $query['columns'] !== [])
+            ? $query['columns']
+            : $groupBy;
+        $parts = [];
+        foreach ($cols as $c) {
+            $parts[] = $d->quoteIdent((string) $c);
+        }
+        foreach ($aggregates as $agg) {
+            $parts[] = aggregateSql($d, $agg);
+        }
+        $selectSql = joinComma($parts);
+        $gb = [];
+        foreach ($groupBy as $c) {
+            $gb[] = $d->quoteIdent((string) $c);
+        }
+        $groupBySql = ' GROUP BY ' . joinComma($gb);
+    } else {
+        /** @var list<string> $columns */
+        $columns = is_array($query['columns'] ?? null) ? $query['columns'] : [];
+        $selectSql = selectColumns($d, $columns);
+        $groupBySql = '';
+    }
+
+    $orderBy = $query['orderBy'] ?? null;
+    if (is_array($orderBy) && $orderBy !== []) {
+        $parts = [];
+        foreach ($orderBy as $clause) {
+            /** @var array<string, mixed> $clause */
+            $dir = strtoupper((string) ($clause['direction'] ?? 'asc'));
+            $parts[] = $d->quoteIdent((string) $clause['column']) . ' ' . $dir;
+        }
+        $orderBySql = ' ORDER BY ' . joinComma($parts);
+    } elseif ($hasGroupBy) {
+        $orderBySql = ' ORDER BY ' . $d->quoteIdent((string) $groupBy[0]) . ' ASC';
+    } else {
+        $orderBySql = ' ORDER BY ' . $d->quoteIdent($pk) . ' ASC';
+    }
+
+    return [
+        'selectSql' => $selectSql,
+        'groupBySql' => $groupBySql,
+        'orderBySql' => $orderBySql,
+        'hasGroupBy' => $hasGroupBy,
+    ];
+}
